@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  # Python Бэкэнд сервис
+  backend:
+    build:
+      context: ./yt_backend
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./yt_backend/temp_downloads:/app/temp_downloads # Татсан файлуудыг Mac дээрээ ч харж болохоор холбож өгөв
+    restart: always
+
+  # Flutter Фронтэнд сервис
+  frontend:
+    build:
+      context: ./yt_frontend
+    ports:
+      - "8080:80" # Контейнерын 80 портыг Mac-ийн 8080 порт руу холбоно
+    restart: always
+    depends_on:
+      - backend
