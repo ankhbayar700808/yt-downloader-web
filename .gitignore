@@ -1,0 +1,23 @@
+# Python (Backend) үл хэрэгсэх файлууд
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.venv/
+**/venv/
+**/ENV/
+**/temp_downloads/   # 🔥 Бэкэндийн түр зуур татдаг ZIP-үүдийг GitHub руу оруулахгүй!
+
+# Flutter (Frontend) үл хэрэгсэх файлууд
+**/build/
+**/.dart_tool/
+**/.packages
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/generated_plugin_registrant.dart
+
+# Системийн файлууд (Mac, VS Code)
+.DS_Store
+.vscode/
+.idea/
+*.log
