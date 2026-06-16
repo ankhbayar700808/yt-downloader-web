@@ -27,29 +27,85 @@ app.add_middleware(
 TEMP_DIR = "temp_downloads"
 os.makedirs(TEMP_DIR, exist_ok=True)
 
+# 🔥 1. ШИНЭЧЛЭГДСЭН ПЛЭЙЛИСТ УНШИХ API (Thumbnail линк давхар буцаана)
 @app.get("/playlist")
 def get_playlist(url: str):
     if not url:
-        raise HTTPException(status_code=400, detail="Playlist URL шаардлагатай")
-    ydl_opts = {'extract_flat': True, 'skip_download': True}
+        raise HTTPException(status_code=400, detail="Линк хоосон байна")
+    
+    ydl_opts = {
+        'extract_flat': True,
+        'skip_download': True,
+        'quiet': True
+    }
+    
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
+            
             if 'entries' not in info:
-                raise HTTPException(status_code=400, detail="Энэ плэйлист линк биш байна")
-            videos = []
-            for entry in info['entries']:
-                if entry:
-                    videos.append({
-                        "id": entry.get("id"),
-                        "title": entry.get("title"),
-                        "duration": entry.get("duration"),
-                        "url": f"https://www.youtube.com/watch?v={entry.get('id')}"
-                    })
-            return {"playlistTitle": info.get("title"), "totalVideos": len(videos), "videos": videos}
+                # Хэрэв нэг бие даасан видеоны линк оруулсан бол плэйлист хэлбэрт шилжүүлнэ
+                videos = [{
+                    'id': info.get('id'),
+                    'title': info.get('title'),
+                    'duration': info.get('duration'),
+                    'thumbnail': info.get('thumbnail') or f"https://img.youtube.com/vi/{info.get('id')}/mqdefault.jpg"
+                }]
+                title = info.get('title')
+            else:
+                title = info.get('title', 'Юүтүб Плэйлист')
+                videos = []
+                for entry in info['entries']:
+                    if entry:
+                        v_id = entry.get('id')
+                        videos.append({
+                            'id': v_id,
+                            'title': entry.get('title'),
+                            'duration': entry.get('duration'),
+                            # Юүтүб стандарт зургийн бэлэн линк үүсгэх (Хурдан ажиллагаанд зориулж)
+                            'thumbnail': f"https://img.youtube.com/vi/{v_id}/mqdefault.jpg"
+                        })
+            
+            return {"playlistTitle": title, "videos": videos}
+            
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Алдаа гарлаа: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Мэдээлэл татахад алдаа гарлаа: {str(e)}")
 
+# 🔥 2. ШИНЭ ШУУД ХАЙЛТЫН API (Search Sync)
+@app.get("/search")
+def search_youtube(q: str):
+    if not q:
+        raise HTTPException(status_code=400, detail="Хайлтын үг хоосон байна")
+    
+    # ytsearch50: Юүтүбээс эхний 50 илэрцийг хайна
+    ydl_opts = {
+        'extract_flat': True,
+        'skip_download': True,
+        'quiet': True,
+        'playlist_items': '1-50'
+    }
+    
+    try:
+        search_query = f"ytsearch50:{q}"
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(search_query, download=False)
+            entries = info.get('entries', [])
+            
+            videos = []
+            for entry in entries:
+                if entry:
+                    v_id = entry.get('id')
+                    videos.append({
+                        'id': v_id,
+                        'title': entry.get('title'),
+                        'duration': entry.get('duration'),
+                        'thumbnail': f"https://img.youtube.com/vi/{v_id}/mqdefault.jpg"
+                    })
+            
+            return {"playlistTitle": f"'{q}' хайлтын үр дүн", "videos": videos}
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Хайлт хийхэд алдаа гарлаа: {str(e)}")
 # 🔥 1. Татах явцыг Фронт руу Real-time мэдээлэх SSE (Server-Sent Events) Endpoint
 @app.get("/download-progress")
 def download_progress(ids: str, format: str):
@@ -223,3 +279,30 @@ def fetch_file(file_id: str, background_tasks: BackgroundTasks):
         media_type="application/zip", 
         filename=urllib.parse.quote(f"youtube_playlist.zip")
     )
+# ... (Бусад кодууд хэвээрээ үлдэнэ, хамгийн доор нь нэмээрэй)
+
+@app.get("/audio-stream")
+def get_audio_stream(video_id: str):
+    if not video_id:
+        raise HTTPException(status_code=400, detail="Video ID дутуу байна")
+        
+    # Зөвхөн хамгийн тохиромжтой аудио линкийг маш хурдан шүүж авах тохиргоо
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'skip_download': True,
+        'quiet': True,
+    }
+    
+    try:
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=False)
+            # Юүтүбээс ирэх шууд аудио урсгалын URL
+            stream_url = info.get('url')
+            if not stream_url:
+                raise HTTPException(status_code=404, detail="Аудио урсгал олдсонгүй")
+                
+            return {"streamUrl": stream_url}
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Аудио линк авахад алдаа гарлаа: {str(e)}")

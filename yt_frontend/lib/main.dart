@@ -13,13 +13,29 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      title: 'AB Media Downloader',
       debugShowCheckedModeBanner: false,
-      title: 'YouTube Playlist Downloader',
       theme: ThemeData(
-        brightness: Brightness.dark,
-        primaryColor: Colors.red,
-        scaffoldBackgroundColor: const Color(0xFF121212),
-        cardTheme: const CardTheme(color: Color(0xFF1E1E1E)),
+        brightness: Brightness.light,
+        scaffoldBackgroundColor: const Color(0xFFF5F7FA),
+        primaryColor: const Color(0xFF0A2A92),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF0A2A92),
+          secondary: const Color(0xFF5992C6),
+          surface: Colors.white,
+        ),
+        cardTheme: CardTheme(
+          color: Colors.white,
+          elevation: 2,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          shadowColor: Colors.black.withOpacity(0.05),
+        ),
+        checkboxTheme: CheckboxThemeData(
+          fillColor: WidgetStateProperty.resolveWith<Color?>((states) {
+            if (states.contains(WidgetState.selected)) return const Color(0xFF0A2A92);
+            return null;
+          }),
+        ),
       ),
       home: const HomeScreen(),
     );
@@ -38,8 +54,8 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isLoading = false;
   String _playlistTitle = '';
   List<dynamic> _playlistVideos = [];
-  
-  // Сонголтын бүтэц
+  bool _isSearchMode = false;
+
   final Map<String, Map<String, bool>> _videoSelectionMap = {};
   
   bool _isDownloading = false;
@@ -48,10 +64,108 @@ class _HomeScreenState extends State<HomeScreen> {
 
   final String _backendUrl = 'http://localhost:5000';
 
-  Future<void> _fetchPlaylist() async {
-    final inputUrl = _urlController.text.trim();
-    if (inputUrl.isEmpty) {
-      _showSnackBar('Юүтүб плэйлист линк оруулна уу!');
+  // 🎵 АУДИО ТОГЛУУЛАГЧИЙН ТӨЛӨВҮҮД
+  html.AudioElement? _audioPlayer;
+  bool _isPlaying = false;
+  String _currentPlayingTitle = '';
+  String _currentPlayingThumbnail = '';
+  bool _isAudioLoading = false;
+  int _currentPlayingIndex = -1;
+
+  @override
+  void initState() {
+    super.initState();
+    
+    _urlController.addListener(() {
+      final text = _urlController.text.trim();
+      final isLink = text.startsWith('http://') || text.startsWith('https://') || text.contains('youtube.com') || text.contains('youtu.be');
+      setState(() {
+        _isSearchMode = text.isNotEmpty && !isLink;
+      });
+    });
+
+    _audioPlayer = html.AudioElement();
+    _audioPlayer?.onPlay.listen((_) => setState(() => _isPlaying = true));
+    _audioPlayer?.onPause.listen((_) => setState(() => _isPlaying = false));
+    
+    _audioPlayer?.onEnded.listen((_) {
+      _playNext();
+    });
+  }
+
+  @override
+  void dispose() {
+    _audioPlayer?.pause();
+    _audioPlayer = null;
+    _urlController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _playAudio(int index) async {
+    if (index < 0 || index >= _playlistVideos.length) return;
+
+    final video = _playlistVideos[index];
+    final String videoId = video['id'] ?? '';
+    final String title = video['title'] ?? 'Нэргүй видео';
+    final String thumbnail = video['thumbnail'] ?? '';
+
+    if (_currentPlayingIndex == index && _audioPlayer != null) {
+      if (_isPlaying) {
+        _audioPlayer!.pause();
+      } else {
+        _audioPlayer!.play();
+      }
+      return;
+    }
+
+    setState(() {
+      _isAudioLoading = true;
+      _currentPlayingIndex = index;
+      _currentPlayingTitle = title;
+      _currentPlayingThumbnail = thumbnail;
+    });
+
+    try {
+      final response = await http.get(Uri.parse('$_backendUrl/audio-stream?video_id=$videoId'));
+      if (response.statusCode == 200) {
+        final data = json.decode(utf8.decode(response.bodyBytes));
+        final String streamUrl = data['streamUrl'];
+        
+        _audioPlayer?.src = streamUrl;
+        _audioPlayer?.load();
+        _audioPlayer?.play();
+      } else {
+        _showSnackBar('Дууны урсгалыг ачаалахад алдаа гарлаа.');
+      }
+    } catch (e) {
+      _showSnackBar('Бэкэнд сэрвэртэй холбогдож чадсангүй.');
+    } finally {
+      setState(() { _isAudioLoading = false; });
+    }
+  }
+
+  void _playNext() {
+    if (_playlistVideos.isEmpty) return;
+    int nextIndex = _currentPlayingIndex + 1;
+    if (nextIndex >= _playlistVideos.length) {
+      nextIndex = 0;
+    }
+    _playAudio(nextIndex);
+  }
+
+  void _playPrevious() {
+    if (_playlistVideos.isEmpty) return;
+    int prevIndex = _currentPlayingIndex - 1;
+    if (prevIndex < 0) {
+      prevIndex = _playlistVideos.length - 1;
+    }
+    _playAudio(prevIndex);
+  }
+
+  Future<void> _fetchData() async {
+    final inputText = _urlController.text.trim();
+    if (inputText.isEmpty) {
+      _showSnackBar('Юүтүб линк эсвэл хайх үг оруулна уу!');
       return;
     }
 
@@ -60,19 +174,20 @@ class _HomeScreenState extends State<HomeScreen> {
       _playlistVideos = [];
       _playlistTitle = '';
       _videoSelectionMap.clear();
+      _currentPlayingIndex = -1;
+      _currentPlayingTitle = '';
     });
 
     try {
-      final encodedUrl = Uri.encodeComponent(inputUrl);
-      final response = await http.get(Uri.parse('$_backendUrl?url=$encodedUrl')); // FastAPI /playlist биш үндсэн рүү чиглэсэн бол өөрчилж болно
+      final encodedText = Uri.encodeComponent(inputText);
+      final endpoint = _isSearchMode ? 'search?q=$encodedText' : 'playlist?url=$encodedText';
+      
+      final response = await http.get(Uri.parse('$_backendUrl/$endpoint'));
 
-      // Хэрэв таны бэкэнд /playlist endpoint-той бол доорхыг хэвээр үлдээгээрэй:
-      final responsePlaylist = await http.get(Uri.parse('$_backendUrl/playlist?url=$encodedUrl'));
-
-      if (responsePlaylist.statusCode == 200) {
-        final data = json.decode(utf8.decode(responsePlaylist.bodyBytes));
+      if (response.statusCode == 200) {
+        final data = json.decode(utf8.decode(response.bodyBytes));
         setState(() {
-          _playlistTitle = data['playlistTitle'] ?? 'Нэргүй плэйлист';
+          _playlistTitle = data['playlistTitle'] ?? 'Илэрцүүд';
           _playlistVideos = data['videos'] ?? [];
           
           for (var video in _playlistVideos) {
@@ -83,8 +198,8 @@ class _HomeScreenState extends State<HomeScreen> {
           }
         });
       } else {
-        final errorData = json.decode(utf8.decode(responsePlaylist.bodyBytes));
-        _showSnackBar('Алдаа: ${errorData['detail'] ?? 'Плэйлист уншиж чадсангүй'}');
+        final errorData = json.decode(utf8.decode(response.bodyBytes));
+        _showSnackBar('Алдаа: ${errorData['detail'] ?? 'Мэдээлэл олдохгүй байна'}');
       }
     } catch (e) {
       _showSnackBar('Сервертэй холбогдоход алдаа гарлаа.');
@@ -103,7 +218,7 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     if (mp3Ids.isEmpty && mp4Ids.isEmpty) {
-      _showSnackBar('Татах ямар нэгэн дуу эсвэл формат сонгоогүй байна!');
+      _showSnackBar('Татах ямар нэгэн дуу сонгоогүй байна!');
       return;
     }
 
@@ -137,7 +252,6 @@ class _HomeScreenState extends State<HomeScreen> {
         anchor.setAttribute("download", "youtube_bundle.zip");
         anchor.click();
 
-        // 🔥 ШИНЭЧЛЭЛ 1 & 2: Татаж дууссаны дараа бүгдийг UNCHECKED болгох ба Төлвийг шинэчлэх
         setState(() {
           _isDownloading = false;
           _videoSelectionMap.forEach((id, formats) {
@@ -146,8 +260,7 @@ class _HomeScreenState extends State<HomeScreen> {
           });
         });
         
-        // Снэкбарыг прогресс баар хаагдсаны дараа үзүүлнэ
-        _showSnackBar('🎉 ZIP архив амжилттай бэлэн болж, таталт эхэллээ!');
+        _showSnackBar('🎉 Багц файл амжилттай татагдлаа!');
       }
 
       if (data['status'] == 'error') {
@@ -163,16 +276,6 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
-  void _downloadSingleVideo(String videoUrl, String title) {
-    final formatParam = _selectedFormatForSingle.toLowerCase();
-    final downloadUrl = '$_backendUrl/download-zip?ids=${videoUrl.split('v=')[1]}&format=$formatParam';
-    final html.AnchorElement anchor = html.AnchorElement(href: downloadUrl);
-    anchor.setAttribute("download", "$title.$formatParam");
-    anchor.click();
-  }
-  
-  String _selectedFormatForSingle = 'mp3';
-
   void _toggleSelectAll(bool? checked) {
     setState(() {
       _videoSelectionMap.forEach((id, formats) {
@@ -185,9 +288,9 @@ class _HomeScreenState extends State<HomeScreen> {
   void _showSnackBar(String message) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(message, style: const TextStyle(fontWeight: FontWeight.bold)),
-        backgroundColor: Colors.green[800],
-        duration: const Duration(seconds: 4),
+        content: Text(message, style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
+        backgroundColor: const Color(0xFF0A2A92),
+        duration: const Duration(seconds: 3),
       )
     );
   }
@@ -207,10 +310,8 @@ class _HomeScreenState extends State<HomeScreen> {
     return count;
   }
 
-  // 🔥 ШИНЭЧЛЭЛ 3: Сонгосон дуунуудын нийт БАГТААМЖИЙГ тооцоолох функц
   String _calculateTotalSize() {
     double totalMB = 0.0;
-
     for (var video in _playlistVideos) {
       final id = video['id'];
       if (id == null || !_videoSelectionMap.containsKey(id)) continue;
@@ -220,69 +321,100 @@ class _HomeScreenState extends State<HomeScreen> {
       int durationSeconds = durationRaw is int ? durationRaw : int.tryParse(durationRaw.toString()) ?? 0;
       double durationMinutes = durationSeconds / 60.0;
 
-      // MP3 = ~1MB/минут, MP4 = ~4MB/минут
-      if (formats['mp3'] == true) {
-        totalMB += (durationMinutes * 1.0);
-      }
-      if (formats['mp4'] == true) {
-        totalMB += (durationMinutes * 4.0);
-      }
+      if (formats['mp3'] == true) totalMB += (durationMinutes * 1.0);
+      if (formats['mp4'] == true) totalMB += (durationMinutes * 4.0);
     }
 
     if (totalMB == 0) return "0 MB";
-    if (totalMB > 1024) {
-      return "${(totalMB / 1024).toStringAsFixed(2)} GB";
-    }
+    if (totalMB > 1024) return "${(totalMB / 1024).toStringAsFixed(2)} GB";
     return "${totalMB.toStringAsFixed(1)} MB";
   }
 
   @override
   Widget build(BuildContext context) {
     int totalFilesToDownload = _getTotalSelectedCount();
-    String estimatedSize = _calculateTotalSize(); // Багтаамжийг тооцож авах
+    String estimatedSize = _calculateTotalSize();
     
     bool isAllSelected = _videoSelectionMap.isNotEmpty && 
         _videoSelectionMap.values.every((f) => f['mp3'] == true && f['mp4'] == true);
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('🔴 YouTube Multi-Format Downloader'),
-        backgroundColor: Colors.red[900],
+        backgroundColor: const Color(0xFF0A2A92),
+        elevation: 0,
+        title: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Image.asset(
+                'ab-logo.png',
+                height: 36,
+                width: 36,
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) {
+                  return const Icon(Icons.play_circle_fill, color: Colors.white, size: 36);
+                },
+              ),
+            ),
+            const SizedBox(width: 12),
+            RichText(
+              text: const TextSpan(
+                style: TextStyle(fontSize: 19, fontWeight: FontWeight.bold, letterSpacing: 0.5),
+                children: [
+                  TextSpan(text: 'AB ', style: TextStyle(color: Color(0xFF5992C6))),
+                  TextSpan(text: 'Media Downloader', style: TextStyle(color: Colors.white)),
+                ],
+              ),
+            ),
+          ],
+        ),
         centerTitle: true,
       ),
+      
+      // `bottomNavigationBar`-ийг бүрэн устгав. Тоглуулагчийг body-ийн жагсаалт дотор байрлуулсан.
       body: Padding(
-        padding: const EdgeInsets.all(24.0),
+        padding: const EdgeInsets.fromLTRB(24.0, 24.0, 24.0, 16.0),
         child: Center(
           child: Container(
             constraints: const BoxConstraints(maxWidth: 950),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Оролтын хэсэг
+                // 🔍 Хайлтын хэсэг
                 Card(
-                  elevation: 6,
                   child: Padding(
-                    padding: const EdgeInsets.all(20.0),
+                    padding: const EdgeInsets.all(16.0),
                     child: Row(
                       children: [
                         Expanded(
                           child: TextField(
                             controller: _urlController,
-                            decoration: const InputDecoration(
-                              border: OutlineInputBorder(),
-                              labelText: 'YouTube Playlist URL паст хийнэ үү',
-                              prefixIcon: Icon(Icons.playlist_play, color: Colors.red),
+                            onSubmitted: (_) => _isLoading ? null : _fetchData(),
+                            style: const TextStyle(color: Color(0xFF1A202C)),
+                            decoration: InputDecoration(
+                              border: const OutlineInputBorder(borderSide: BorderSide(color: Color(0xFFE2E8F0))),
+                              enabledBorder: const OutlineInputBorder(borderSide: BorderSide(color: Color(0xFFE2E8F0))),
+                              focusedBorder: const OutlineInputBorder(borderSide: BorderSide(color: Color(0xFF0A2A92), width: 1.5)),
+                              labelText: _isSearchMode ? 'Юүтүбээс хайх үг (Эхний 50 илэрц)...' : 'YouTube Playlist URL эсвэл хайх үг...',
+                              labelStyle: TextStyle(color: Colors.grey[600]),
+                              prefixIcon: Icon(_isSearchMode ? Icons.search : Icons.playlist_play, color: const Color(0xFF5992C6)),
                             ),
                           ),
                         ),
                         const SizedBox(width: 16),
                         ElevatedButton.icon(
-                          onPressed: _isLoading ? null : _fetchPlaylist,
+                          onPressed: _isLoading ? null : _fetchData,
                           icon: _isLoading 
-                            ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                            : const Icon(Icons.refresh),
-                          label: const Text('Плэйлист Уншуулах'),
-                          style: ElevatedButton.styleFrom(backgroundColor: Colors.red[700], foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 19)),
+                            ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                            : Icon(_isSearchMode ? Icons.search : Icons.cloud_download),
+                          label: Text(_isSearchMode ? 'Шууд Хайх' : 'Уншуулах'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: _isSearchMode ? const Color(0xFF5992C6) : const Color(0xFF0A2A92), 
+                            foregroundColor: Colors.white, 
+                            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 19),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                          ),
                         ),
                       ],
                     ),
@@ -290,10 +422,10 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 const SizedBox(height: 16),
 
-                // Прогресс харуулах хэсэг
+                // Прогресс бар
                 if (_isDownloading)
                   Card(
-                    color: Colors.blueGrey[900],
+                    color: const Color(0xFFEDF2F7),
                     child: Padding(
                       padding: const EdgeInsets.all(16.0),
                       child: Column(
@@ -302,29 +434,25 @@ class _HomeScreenState extends State<HomeScreen> {
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
-                              Expanded(
-                                child: Text(_progressMessage, style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.cyanAccent)),
-                              ),
-                              Text('${(_downloadProgress * 100).toStringAsFixed(0)}%', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.cyanAccent)),
+                              Expanded(child: Text(_progressMessage, style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF0A2A92)))),
+                              Text('${(_downloadProgress * 100).toStringAsFixed(0)}%', style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF0A2A92))),
                             ],
                           ),
                           const SizedBox(height: 12),
-                          LinearProgressIndicator(
-                            value: _downloadProgress,
-                            backgroundColor: Colors.grey[800],
-                            color: Colors.cyan,
-                            minHeight: 8,
-                          ),
+                          LinearProgressIndicator(value: _downloadProgress, backgroundColor: Colors.grey[300], color: const Color(0xFF5992C6), minHeight: 6),
                         ],
                       ),
                     ),
                   ),
 
-                // Масс удирдлагын хэсэг
-                if (_playlistVideos.isNotEmpty && !_isDownloading)
+                // Сонгох хэсэг
+                if (_playlistVideos.isNotEmpty && !_isDownloading) ...[
+                  Padding(
+                    padding: const EdgeInsets.only(left: 8.0, bottom: 8.0),
+                    child: Text(_playlistTitle, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF1A202C))),
+                  ),
                   Card(
-                    color: Colors.red[950]?.withOpacity(0.15),
-                    margin: const EdgeInsets.only(bottom: 12),
+                    color: const Color(0xFFEBF8FF),
                     child: Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
                       child: Row(
@@ -332,36 +460,33 @@ class _HomeScreenState extends State<HomeScreen> {
                         children: [
                           Row(
                             children: [
-                              Checkbox(
-                                value: isAllSelected, 
-                                activeColor: Colors.red, 
-                                onChanged: _toggleSelectAll
-                              ),
-                              const Text('Бүх дууны MP3, MP4-ийг зэрэг сонгох', style: TextStyle(fontWeight: FontWeight.bold)),
-                              const SizedBox(width: 12),
-                              Text('(Нийт файл: $totalFilesToDownload)', style: const TextStyle(color: Colors.grey, fontWeight: FontWeight.bold)),
+                              Checkbox(value: isAllSelected, onChanged: _toggleSelectAll),
+                              const Text('Бүгдийг сонгох', style: TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF2B6CB0))),
+                              const SizedBox(width: 8),
+                              Text('(Нийт файл: $totalFilesToDownload)', style: TextStyle(color: Colors.grey[600], fontWeight: FontWeight.bold, fontSize: 13)),
                             ],
                           ),
-                          // 🔥 ШИНЭЧЛЭЛТ: Татах товчлуур дээр Нийт тоо болон Багтаамж хамт харагдана
                           ElevatedButton.icon(
                             onPressed: totalFilesToDownload == 0 ? null : _downloadSelectedVideosStream,
                             icon: const Icon(Icons.download_for_offline),
                             label: Text('Багцыг татах ($totalFilesToDownload файл ~ $estimatedSize)'),
                             style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.green[700], 
+                              backgroundColor: const Color(0xFF2F855A), 
                               foregroundColor: Colors.white, 
-                              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14)
+                              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                             ),
                           ),
                         ],
                       ),
                     ),
                   ),
+                ],
 
-                // Дуунуудын жагсаалт
+                // Жагсаалт харуулах хэсэг
                 Expanded(
                   child: _playlistVideos.isEmpty
-                      ? Center(child: _isLoading ? const Text('Юүтүбээс мэдээлэл татаж байна...') : const Text('Одоогоор жагсаалт хоосон байна.', style: TextStyle(color: Colors.grey)))
+                      ? Center(child: _isLoading ? const Text('Юүтүбээс мэдээлэл шүүж байна...', style: TextStyle(color: Colors.grey)) : const Text('Юүтүб линк оруулах эсвэл хайх үгээ бичээд Enter дарна уу.', style: TextStyle(color: Colors.grey)))
                       : ListView.builder(
                           itemCount: _playlistVideos.length,
                           itemBuilder: (context, index) {
@@ -369,71 +494,182 @@ class _HomeScreenState extends State<HomeScreen> {
                             final id = video['id'] ?? '';
                             final title = video['title'] ?? 'Нэргүй видео';
                             final duration = _formatDuration(video['duration']);
+                            final thumbnailUrl = video['thumbnail'] ?? '';
                             
                             final formats = _videoSelectionMap[id] ?? {'mp3': false, 'mp4': false};
                             final bool isMp3Checked = formats['mp3'] ?? false;
                             final bool isMp4Checked = formats['mp4'] ?? false;
                             final bool isMainChecked = isMp3Checked || isMp4Checked;
 
+                            final bool isThisPlaying = _currentPlayingIndex == index && _isPlaying;
+
                             return Card(
                               margin: const EdgeInsets.symmetric(vertical: 4),
-                              child: Padding(
-                                padding: const EdgeInsets.symmetric(vertical: 6.0),
-                                child: ListTile(
-                                  leading: Checkbox(
-                                    value: isMainChecked,
-                                    activeColor: Colors.red,
-                                    onChanged: _isDownloading ? null : (bool? value) {
-                                      setState(() {
-                                        formats['mp3'] = value ?? false;
-                                        formats['mp4'] = value ?? false;
-                                      });
-                                    },
-                                  ),
-                                  title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: isMainChecked ? Colors.white : Colors.grey, fontWeight: isMainChecked ? FontWeight.bold : FontWeight.normal)),
-                                  subtitle: Text('Хугацаа: $duration', style: const TextStyle(color: Colors.grey)),
-                                  
-                                  trailing: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      // MP3 Checkbox
-                                      Row(
+                              child: ListTile(
+                                leading: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Checkbox(
+                                      value: isMainChecked,
+                                      onChanged: _isDownloading ? null : (bool? value) {
+                                        setState(() {
+                                          formats['mp3'] = value ?? false;
+                                          formats['mp4'] = value ?? false;
+                                        });
+                                      },
+                                    ),
+                                    const SizedBox(width: 4),
+                                    InkWell(
+                                      onTap: () => _playAudio(index),
+                                      borderRadius: BorderRadius.circular(6),
+                                      child: Stack(
+                                        alignment: Alignment.center,
                                         children: [
-                                          const Text('MP3', style: TextStyle(fontSize: 12, color: Colors.grey)),
-                                          Checkbox(
-                                            value: isMp3Checked,
-                                            activeColor: Colors.red[700],
-                                            onChanged: _isDownloading ? null : (bool? value) {
-                                              setState(() {
-                                                formats['mp3'] = value ?? false;
-                                              });
-                                            },
+                                          ClipRRect(
+                                            borderRadius: BorderRadius.circular(6),
+                                            child: Image.network(thumbnailUrl, width: 75, height: 45, fit: BoxFit.cover),
+                                          ),
+                                          Container(
+                                            width: 75,
+                                            height: 45,
+                                            decoration: BoxDecoration(color: Colors.black26, borderRadius: BorderRadius.circular(6)),
+                                            child: Icon(
+                                              isThisPlaying ? Icons.pause : Icons.play_arrow, 
+                                              color: Colors.white, 
+                                              size: 24
+                                            ),
                                           ),
                                         ],
                                       ),
-                                      const SizedBox(width: 10),
-                                      // MP4 Checkbox
-                                      Row(
-                                        children: [
-                                          const Text('MP4', style: TextStyle(fontSize: 12, color: Colors.grey)),
-                                          Checkbox(
-                                            value: isMp4Checked,
-                                            activeColor: Colors.blue[700],
-                                            onChanged: _isDownloading ? null : (bool? value) {
-                                              setState(() {
-                                                formats['mp4'] = value ?? false;
-                                              });
-                                            },
-                                          ),
-                                        ],
-                                      ),
-                                    ],
-                                  ),
+                                    ),
+                                  ],
+                                ),
+                                title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: isThisPlaying ? const Color(0xFF5992C6) : (isMainChecked ? const Color(0xFF0A2A92) : const Color(0xFF2D3748)), fontWeight: (isMainChecked || isThisPlaying) ? FontWeight.bold : FontWeight.normal, fontSize: 14)),
+                                subtitle: Text('Хугацаа: $duration', style: TextStyle(color: Colors.grey[600], fontSize: 12)),
+                                trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        Text('MP3', style: TextStyle(fontSize: 12, color: Colors.grey[700], fontWeight: FontWeight.bold)),
+                                        Checkbox(
+                                          value: isMp3Checked,
+                                          onChanged: _isDownloading ? null : (bool? value) {
+                                            setState(() { formats['mp3'] = value ?? false; });
+                                          },
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Row(
+                                      children: [
+                                        Text('MP4', style: TextStyle(fontSize: 12, color: Colors.grey[700], fontWeight: FontWeight.bold)),
+                                        Checkbox(
+                                          value: isMp4Checked,
+                                          onChanged: _isDownloading ? null : (bool? value) {
+                                            setState(() { formats['mp4'] = value ?? false; });
+                                          },
+                                        ),
+                                      ],
+                                    ),
+                                  ],
                                 ),
                               ),
                             );
                           },
                         ),
+                ),
+                
+                // 🔥 ЗӨВ БАЙРЛАЛ: АУДИО ТОГЛУУЛАГЧИЙГ FOOTER-ИЙН ДЭЭД ТАЛД ОРУУЛАВ
+                if (_currentPlayingTitle.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Container(
+                    height: 72,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0A2A92),
+                      borderRadius: BorderRadius.circular(12),
+                      boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 6, offset: Offset(0, 2))]
+                    ),
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    child: Row(
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(6),
+                          child: Image.network(_currentPlayingThumbnail, width: 80, height: 50, fit: BoxFit.cover),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(_currentPlayingTitle, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13)),
+                              const SizedBox(height: 2),
+                              Text(_isAudioLoading ? 'Урсгал ачаалж байна...' : 'Дарааллаас тоглуулж байна', style: const TextStyle(color: Color(0xFF5992C6), fontSize: 11)),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.skip_previous_rounded, size: 28, color: Colors.white),
+                              onPressed: _isAudioLoading ? null : _playPrevious,
+                            ),
+                            IconButton(
+                              icon: _isAudioLoading 
+                                ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                                : Icon(_isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled, size: 38, color: Colors.white),
+                              onPressed: _isAudioLoading ? null : () {
+                                if (_isPlaying) { _audioPlayer?.pause(); } else { _audioPlayer?.play(); }
+                              },
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.skip_next_rounded, size: 28, color: Colors.white),
+                              onPressed: _isAudioLoading ? null : _playNext,
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+
+                const SizedBox(height: 16),
+                
+                // 🔒 FOOTER ХАМГИЙН ДООРОО БАТ БАЙРЛАЛАА ХАДГАЛЛАА
+                Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        "Developed by Ankhbayar Bayarsaikhan and Gemini AI. © 2026.",
+                        style: TextStyle(color: Colors.grey[600], fontSize: 13, fontWeight: FontWeight.w500),
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 4),
+                      InkWell(
+                        onTap: () {
+                          html.window.open('https://opensource.org/licenses/MIT', '_blank');
+                        },
+                        borderRadius: BorderRadius.circular(4),
+                        child: const Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 8.0, vertical: 2.0),
+                          child: Text(
+                            "Released under the MIT Open Source License",
+                            style: TextStyle(
+                              color: Color(0xFF5992C6),
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              decoration: TextDecoration.underline,
+                              decorationColor: Color(0xFF5992C6),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ],
             ),
